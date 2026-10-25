@@ -5,7 +5,13 @@
 
 package runtime
 
+/*
+	编译时给 Go runtime 的 goroutine 结构增加字段，并在创建新 goroutine 时，将父 goroutine 的当前 Span 继承过去
+	数据附着在 goroutine 上，因此 goroutine 被调度到不同线程时，仍然访问自己的那份数据。
+*/
+
 func GetTraceContextFromGLS() interface{} {
+	// 从当前 goroutine 的上下文通过以下方式读取
 	return getg().m.curg.otel_trace_context
 }
 
@@ -14,6 +20,7 @@ func GetBaggageContainerFromGLS() interface{} {
 }
 
 func SetTraceContextToGLS(traceContext interface{}) {
+	// 通过以下方式将traceContext写入当前 goroutine 的上下文
 	getg().m.curg.otel_trace_context = traceContext
 }
 

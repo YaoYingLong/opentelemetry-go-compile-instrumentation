@@ -60,6 +60,7 @@ var instConfigCache atomic.Pointer[configCache]
 //     b3multi, jaeger, xray, ottrace, none). Default: "tracecontext,baggage"
 //   - OTEL_LOG_LEVEL: Log level (debug, info, warn, error)
 func SetupOTelSDK() {
+	// 如果配置了disabled直接退出
 	if strings.EqualFold(os.Getenv("OTEL_SDK_DISABLED"), "true") {
 		Logger().Info("OpenTelemetry SDK disabled via OTEL_SDK_DISABLED=true, skipping initialization")
 		return

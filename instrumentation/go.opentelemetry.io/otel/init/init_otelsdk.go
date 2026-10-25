@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otelc/pkg/runtime"
 )
 
+// 向应用的 main 包注入 init()，自动初始化 OpenTelemetry SDK，并启动 Go runtime 指标采集。
 func init() {
 	// Initialize OpenTelemetry SDK (sets up global tracer and meter providers)
 	runtime.SetupOTelSDK()

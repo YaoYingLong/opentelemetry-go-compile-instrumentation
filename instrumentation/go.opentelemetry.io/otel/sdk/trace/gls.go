@@ -33,6 +33,7 @@ func beforeNonRecordingSpanEnd(_ hook.HookContext, span any, _ ...any) {
 	deleteSpanFromGLS(span)
 }
 
+// 在 Span 创建后，将其加入当前 goroutine 的本地存储（GLS）；在 Span 结束时移除。包括 recording 和 non-recording Span
 func addSpanToGLS(span any) {
 	if span != nil {
 		if s, ok := span.(trace.Span); ok {

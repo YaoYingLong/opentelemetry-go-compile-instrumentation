@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otelc/pkg/runtime"
 )
 
+// 拦截 trace.SpanFromContext(ctx)：如果从 ctx 取出的 Span 无效，就尝试返回 GLS 中的当前 Span。
 func afterSpanFromContext(ictx hook.HookContext, span trace.Span) {
 	if !span.SpanContext().IsValid() {
 		glsSpan := runtime.GetSpanFromGLS()
