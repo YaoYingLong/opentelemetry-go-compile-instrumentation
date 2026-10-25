@@ -1,5 +1,9 @@
+# 中文导读：顶层 version 是读取本文件所需的最低 otelc 版本。
+# 具体规则内的 version 才是目标依赖的版本范围。
 version: "v1.0.0"
 
+# 先拦截“创建客户端”这一低频入口，再利用库原生 AddHook 覆盖后续高频命令，
+# 因此无需逐个列出 GET/SET/DEL 的编译规则。after 参数来自原函数返回值。
 redis_hook_newclient:
   target: github.com/redis/go-redis/v9
   where:
@@ -27,6 +31,9 @@ redis_hook_newsentinelclient:
         after: afterNewSentinelClientV9
         path: "go.opentelemetry.io/otelc/instrumentation/github.com/redis/go-redis/v9"
 
+# 版本范围是半开区间：>= v9.0.0 且 < v9.9.0；上界 v9.9.0 不包含在内。
+# v9.9.0 起 Conn 继承 client 已有 Hook，再加一次会重复记录。配套集成测试同时构建
+# v9.8.0 和当前依赖版本，并要求 Client GET、Conn GET 各自恰好生成一个 Span。
 redis_client_hook:
   target: github.com/redis/go-redis/v9
   version: v9.0.0,v9.9.0
@@ -38,6 +45,7 @@ redis_client_hook:
         after: afterClientConnV9
         path: "go.opentelemetry.io/otelc/instrumentation/github.com/redis/go-redis/v9"
 
+# 多节点客户端还要考虑“构造时已有节点”和“后续新节点”，不能仅覆盖顶层对象。
 redis_hook_newringclient:
   target: github.com/redis/go-redis/v9
   where:

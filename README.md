@@ -59,6 +59,7 @@ make test
 - [API Design](./docs/api-design-and-project-structure.md) - API structure
 - [Semantic Conventions](./docs/semantic-conventions.md) - Managing semantic conventions
 - [Instrumentation Guide](./docs/instrument-guide.md) - Add instrumentation hook for new libraries
+- [中文源码阅读指南](./docs/code-reading.zh-CN.md) - Go 基础、Java 插桩对照、核心调用链与组件贡献实践
 - [Instrumentation Rules](./docs/rules.md) - Rule types and YAML format reference
 - [Configuration and Fine-Tuning](./docs/configuration.md) - Scope, filter, and tune instrumentation
 - [Troubleshooting](./docs/troubleshooting.md) - Diagnose why instrumentation was not applied

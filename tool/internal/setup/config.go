@@ -1,6 +1,11 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+// 工具配置文件用于声明“这个模块选择哪些插桩组件”，具体规则仍由组件目录提供。
+// 典型文件名是 otel.instrumentation.go（也兼容 otelc.tool.go），其空白导入
+// 被本文件解析为组件图；它与 add.go 生成的运行时导入文件承担不同职责。
+// pin 生成的清单带 tools 构建标签，普通构建通常不编译它；setup 直接解析它的导入。
+// go.mod 的 tool 声明则用于固定 otelc 工具本身，两者不要与业务运行时导入混为一谈。
 package setup
 
 import (
@@ -28,6 +33,9 @@ const (
 	toolFileAlias     = "otelc.tool.go"
 )
 
+// instrumentationConfig 是解析某个组件 import path 的结果。
+// ToolFile 位于组件所属模块根目录，用于继续寻找组件；RuleFiles 位于该包目录树下。
+// Error 保存在单个结果中，让调用方按使用场景决定报错、剪枝还是继续访问。
 type instrumentationConfig struct {
 	ImportPath string
 	ToolFile   string
@@ -39,6 +47,7 @@ type instrumentationConfig struct {
 var errNotInstrumentation = errors.New("not an instrumentation package")
 
 func findToolFile(moduleDir string) (string, error) {
+	// 两个文件名是兼容关系，而非可合并的两份配置；同时存在应报错，避免来源歧义。
 	canonical := filepath.Join(moduleDir, toolFileCanonical)
 	alias := filepath.Join(moduleDir, toolFileAlias)
 
@@ -87,6 +96,9 @@ func resolveInstrumentationConfigs(
 	dir string,
 	importPaths []string,
 ) (map[string]*instrumentationConfig, error) {
+	// 用 Go 自己的模块解析定位源码目录，因而能遵守 require/replace 与模块缓存规则。
+	// Dir 指向引用者目录：同一个 import path 必须在引用它的模块上下文中解析。
+	// 此处只读元数据和目录，不要求工具专用包能够按普通构建标签成功编译。
 	if len(importPaths) == 0 {
 		return nil, nil
 	}
@@ -142,6 +154,7 @@ func resolveInstrumentationConfigs(
 			continue
 		}
 
+		// 跳过嵌套 go.mod 所定义的子模块，避免一个组件意外吞入另一个模块的规则。
 		ruleFiles, walkErr := rulesFromDir(pkgDir, true)
 		if walkErr != nil {
 			cfgs[importPath].Error = ex.Wrapf(walkErr, "walking instrumentation package %s", importPath)
@@ -183,6 +196,8 @@ type instrumentationVisit struct {
 type instrumentationVisitor func(visit *instrumentationVisit) (recurse bool, err error)
 
 func collectImports(toolFile string, f *dst.File, seenImports map[string]bool) ([]string, error) {
+	// 工具配置是组件选择清单，所以只接受 `_ "组件路径"`。
+	// imp.Path.Value 是带引号的 Go 字符串字面量；Unquote 后才是可交给包加载器的路径。
 	importPaths := make([]string, 0, len(f.Imports))
 
 	for _, imp := range f.Imports {
@@ -225,6 +240,10 @@ func collectImports(toolFile string, f *dst.File, seenImports map[string]bool) (
 
 // walkInstrumentation walks the instrumentation tool files and calls the visitor function for each.
 func walkInstrumentation(ctx context.Context, toolFiles []string, visit instrumentationVisitor) error {
+	// 用队列做广度优先遍历，两个 seen 集合分别防止重复 import 和重复工具文件。
+	// visitor 返回 recurse 控制是否追踪该组件模块的工具文件；不同使用者可实现
+	// 规则收集或 pin 校验/剪枝，而不复制整套遍历逻辑。
+	// 这里只解析 ImportsOnly，不执行文件中的 Go 代码，也不执行组件初始化函数。
 	queue := append([]string(nil), toolFiles...)
 	seenImports := make(map[string]bool)
 	seenToolFiles := make(map[string]bool, len(toolFiles))

@@ -27,6 +27,10 @@ import (
 	"go.opentelemetry.io/otelc/tool/util"
 )
 
+// 中文导读：这是 otelc 构建进程中的状态，不是最终应用中的运行时对象。
+// 一次 compile 命令以一个 Go 包为单位；target/parser/tjumps 随源文件切换，
+// compileArgs/importConfig 等则描述整个包的编译。这里持有的 dst 节点是待输出的
+// Go 语法树，只有生成的 trampoline 和 HookContext 才会随应用执行。
 type instrumentPhase struct {
 	logger *slog.Logger
 	// buildContext evaluates build constraints (GOOS, GOARCH, etc.) for file rules.
@@ -166,6 +170,9 @@ func stripCompleteFlag(args []string) []string {
 	return args
 }
 
+// 中文导读：Go 已经选好本次编译的源文件和依赖归档；此处接管的是编译器的输入。
+// 顺序是读取 setup 结果 -> 按包匹配 -> 改写源文件/补依赖 -> 返回编译参数。
+// 这里不会启动真正的编译器，统一由 Toolexec 在拦截完成后执行。
 func interceptCompile(ctx context.Context, args []string) ([]string, error) {
 	// Read compilation output directory
 	target := util.FindFlagValue(args, "-o")
@@ -224,6 +231,9 @@ func interceptCompile(ctx context.Context, args []string) ([]string, error) {
 }
 
 // updateImportConfig updates the importcfg file with new imports that were added during instrumentation.
+// 中文导读：修改 Go 文件的 import 只解决语法层面的引用；编译器还需要 importcfg
+// 中的“导入路径 -> 已编译归档”映射。原始依赖图没有规则新增的 import，因此还要
+// 解析其 export 文件，并将解析到的依赖一并记录，供后面的链接阶段补齐。
 func (ip *instrumentPhase) updateImportConfig(ctx context.Context, newImports map[string]string) error {
 	if ip.importConfigPath == "" {
 		// No importcfg file, skip (shouldn't happen in normal builds)
@@ -308,6 +318,9 @@ const maxResolutionChain = 32
 // otherwise do without ever closing a cycle. The returned function restores
 // the previous chain.
 func (ip *instrumentPhase) enterNestedResolution(added string) (func(), error) {
+	// 中文导读：新增依赖的解析可能再次运行 go 命令，再次触发 otelc 编译拦截。
+	// 原始 Go 文件中并没有这些新增边，普通的 Go import-cycle 检查无法看到
+	// “A 的规则添加 B，B 的规则又添加 A”；用环境变量把等待链传入子进程。
 	prev, hadPrev := os.LookupEnv(util.EnvOtelcNestedResolving)
 	chain := parseResolutionChain(prev)
 	chain = append(chain, resolution{pkg: util.FindFlagValue(ip.compileArgs, "-p"), added: added})
@@ -377,6 +390,8 @@ func describeResolutionChain(chain []resolution) string {
 // During the link phase, all per-process files will be merged.
 // Each compile process writes to its own file to avoid inter-process race conditions.
 func trackAddedImports(packages map[string]string) error {
+	// 中文导读：go build 可以并发编译多个包，且每次 toolexec 是独立进程。
+	// 因此不能用进程内 map 汇总，也不让所有编译器竞争同一份 JSON 文件。
 	if len(packages) == 0 {
 		return nil
 	}
@@ -465,6 +480,8 @@ func loadAddedImports(ctx context.Context) (map[string]string, error) {
 }
 
 // interceptLink updates the link-time importcfg with packages added during compilation.
+// 中文导读：编译器和链接器各自接收 importcfg；修好前者并不会自动修好后者。
+// 这里汇总所有编译进程留下的归档路径，确保新增代码引用的符号能在链接时找到。
 func interceptLink(ctx context.Context, args []string) ([]string, error) {
 	logger := util.LoggerFromContext(ctx)
 
@@ -526,6 +543,9 @@ func interceptLink(ctx context.Context, args []string) ([]string, error) {
 
 const vetToolName = "vet"
 
+// 中文导读：vet 是独立的源码分析步骤，不应该把注入声明当作用户源码分析。
+// cgo 的 .cgo1.go 恰好在构建工作目录中，改写时可能覆盖它；因此本拦截只把
+// vet.cfg 中相应路径切到事先保留的副本，其他源文件和配置字段保持原有语义。
 func interceptVet(ctx context.Context, args []string) ([]string, error) {
 	if len(args) == 0 {
 		return args, nil
@@ -620,6 +640,8 @@ func toolVersionLine(line, rulesHash string) string {
 // reports in its place: the version with an otelc marker, plus the current
 // matched-rules hash when one exists.
 func markedToolVersion(rawOutput string) string {
+	// 中文导读：源码本身没变而规则变了，生成的机器码仍可能变化。
+	// 将规则与 build tags 纳入工具版本标记，让 Go 自己的缓存失效机制感知改写。
 	var rulesHash string
 	if content, err := os.ReadFile(util.GetMatchedRuleFile()); err == nil {
 		// Build tags decide which add_file rule files apply, so a tagged build
@@ -660,6 +682,9 @@ func interceptToolVersion(ctx context.Context, args []string) error {
 // a rule added. Those invocations instrument compiles and run every other
 // command unchanged.
 func Toolexec(ctx context.Context, args []string, nested bool) error {
+	// 中文导读：这相当于 Go 工具链前的一层代理，而不是 Java 的类加载转换器。
+	// args[0] 是 Go 原本要执行的工具，后面才是该工具的参数。asm 等未命中的
+	// 命令直接透传；compile 改写源码，link 补归档，vet 处理 cgo 分析副本。
 	// Use slice-based detection to correctly handle tool paths with spaces
 	// (common on Windows, e.g., "C:\Program Files\Go\pkg\tool\...")
 
@@ -770,6 +795,9 @@ var executablePath = os.Executable
 // during the instrumentation phase must be audited for the tools it runs
 // before it can rely on nested mode.
 func EnableNestedToolexec() error {
+	// 中文导读：嵌套 go list -export 也必须生成同样的插桩归档，不能只统一版本
+	// 标记却编译出不同内容，否则同一缓存键可能对应普通/插桩两套不一致的包。
+	// nested 模式仍拦截 compile，但不重复执行外层 link/vet 的处理流程。
 	execPath, err := executablePath()
 	if err != nil {
 		return ex.Wrapf(err, "resolving otelc executable path")

@@ -1,6 +1,9 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+// 命令分工：pin 固定组件选择，setup 生成构建输入，go 串起准备与构建，
+// toolexec 被 Go 工具链回调，cleanup 根据快照恢复用户工程。
+// 与 Java agent 的 premain 入口不同，这里的入口主要发生在程序运行之前。
 package main
 
 import (
@@ -17,6 +20,7 @@ import (
 	"go.opentelemetry.io/otelc/tool/util"
 )
 
+// cleanup 是独立的恢复入口；例如构建进程被强制终止后，可由下一次调用读取磁盘状态。
 //nolint:gochecknoglobals // Implementation of a CLI command
 var commandCleanup = cli.Command{
 	Name:        "cleanup",
@@ -27,6 +31,8 @@ var commandCleanup = cli.Command{
 	},
 }
 
+// SkipFlagParsing 将 build/test 等参数完整交给 setup.GoBuild 解释，
+// 避免 CLI 库把 -tags、-race 等 Go 参数当成 otelc 自己的选项。
 //nolint:gochecknoglobals // Implementation of a CLI command
 var commandGo = cli.Command{
 	Name:            "go",
@@ -37,6 +43,8 @@ var commandGo = cli.Command{
 	Action:          setup.GoBuild,
 }
 
+// pin 管理的是模块中的插桩组件清单，不是对目标函数执行 AST 改写。
+// --generate 的 *bool 保留三态：nil 表示用户未指定，true/false 才表示显式修改指令。
 //nolint:gochecknoglobals // Implementation of a CLI command
 var commandPin = cli.Command{
 	Name:        "pin",
@@ -75,6 +83,7 @@ var commandPin = cli.Command{
 	},
 }
 
+// 独立 setup 只准备环境；正常的 otelc go 构建也会调用同一个 Setup 实现。
 //nolint:gochecknoglobals // Implementation of a CLI command
 var commandSetup = cli.Command{
 	Name:        "setup",
@@ -83,6 +92,9 @@ var commandSetup = cli.Command{
 	Action:      setup.Setup,
 }
 
+// -toolexec 的参数首先是原始工具路径，然后才是该工具的参数；
+// 保留原始参数后，由 instrument.Toolexec 判断本次是 compile、link 还是直接转发。
+// nested 标记用于区分插桩过程中派生的工具调用，具体递归处理在 instrument 包中。
 //nolint:gochecknoglobals // Implementation of a CLI command
 var commandToolexec = cli.Command{
 	Name:            "toolexec",

@@ -23,6 +23,9 @@ var (
 )
 
 // writerWrapper wraps http.ResponseWriter to capture the status code
+// 中文导读：嵌入 ResponseWriter 让 Header 等方法继续转发，额外重写的方法负责保持语义。
+// 包装接口时必须检查可选能力，否则业务的流式刷新、连接劫持和零拷贝路径可能受到影响。
+// 当前包装器始终实现下面的可选接口，具体调用时才检查底层能力，不代表底层一定支持它们。
 type writerWrapper struct {
 	http.ResponseWriter
 	statusCode  int
@@ -31,12 +34,14 @@ type writerWrapper struct {
 
 // WriteHeader captures the final status code and forwards to the underlying ResponseWriter.
 func (w *writerWrapper) WriteHeader(statusCode int) {
+	// 最终响应只能提交一次；后续 WriteHeader 不应覆盖实际已发送的状态。
 	if w.wroteHeader {
 		return
 	}
 
 	// Informational responses do not commit the final response. Switching
 	// protocols is the exception: net/http treats 101 as final.
+	// 例如 103 Early Hints 之后仍可发送最终 200；101 Switching Protocols 则视为最终响应。
 	if statusCode >= 100 && statusCode <= 199 && statusCode != http.StatusSwitchingProtocols {
 		w.ResponseWriter.WriteHeader(statusCode)
 		return
@@ -69,6 +74,7 @@ type writeOnly struct {
 // capability from io.Copy, and http.ServeFile/http.ServeContent silently fall
 // back to a 32KiB user-space copy loop on every instrumented server.
 func (w *writerWrapper) ReadFrom(src io.Reader) (int64, error) {
+	// 新组件若包装 io.Writer，不能只保证功能正确，还应保留 io.Copy 的可选快路径。
 	// http.ResponseWriter.Write implies a 200 when no status was set; ReadFrom
 	// writes the body the same way, so record it before handing the body off.
 	if !w.wroteHeader {
@@ -107,6 +113,7 @@ func (w *writerWrapper) WriteString(s string) (int, error) {
 
 // Hijack implements the http.Hijacker interface
 func (w *writerWrapper) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	// WebSocket 等升级场景需要把连接控制权交给业务，不能因插桩而隐藏这个能力。
 	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
 		return h.Hijack()
 	}
@@ -132,5 +139,6 @@ func (w *writerWrapper) Push(target string, opts *http.PushOptions) error {
 
 // Unwrap exposes the underlying writer to http.ResponseController.
 func (w *writerWrapper) Unwrap() http.ResponseWriter {
+	// ResponseController 可以沿 Unwrap 继续访问底层连接控制能力。
 	return w.ResponseWriter
 }

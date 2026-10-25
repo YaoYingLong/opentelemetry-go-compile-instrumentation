@@ -1,6 +1,9 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+// 函数规则连接“匹配哪个函数”和“执行哪个 hook”，是新增常规组件时的核心配置模型。
+// 可按 Target/Version/Func/Recv 理解匹配端，再按 Path/Before/After 理解 hook 端；
+// 这些值先被 setup 匹配和持久化，再由 instrument 生成 trampoline 与运行时绑定。
 package rule
 
 import (
@@ -19,6 +22,10 @@ import (
 // compared to the i-th field in order.  For contains matching
 // (signature_contains), each entry is checked for presence anywhere in the
 // corresponding list.
+// 中文导读：这里描述的是目标 Go 函数的类型列表，而不是 hook 函数的类型列表。
+// 精确签名按顺序和数量比较；contains 是“任一命中”：任一指定参数类型出现在参数中，
+// 或任一指定返回类型出现在返回值中即通过，并非要求列出的所有类型都存在。
+// *FuncSignature 指针使“未指定子过滤器”可用 nil 表达，与显式提供空签名区分开。
 type FuncSignature struct {
 	Args    []string `json:"args,omitempty"    yaml:"args"`
 	Returns []string `json:"returns,omitempty" yaml:"returns"`
@@ -46,6 +53,11 @@ type FuncSignature struct {
 //	result: error
 //	last_result: error
 //	param: context.Context
+// 中文导读：InstBaseRule 的匿名嵌入让 Name/Target/Version 等公共字段和方法可直接使用；
+// yaml:",inline" 令它们在 YAML 中与 func、before 等字段处于同一层，而非额外嵌套。
+// Recv 区分普通函数与方法，并区分 T、*T；Before/After 是 hook 包内的函数名。
+// Path 是 hook 的 import path，ResolvedPath 是 setup 解析出的本地目录，不接受 YAML 输入。
+// Result/LastResult/Param 继续过滤目标函数的返回值或参数类型，不是采集属性的配置。
 type InstFuncRule struct {
 	InstBaseRule `yaml:",inline"`
 
@@ -64,6 +76,8 @@ type InstFuncRule struct {
 
 // NewInstFuncRule loads and validates an InstFuncRule from YAML data.
 func NewInstFuncRule(data []byte, name string) (*InstFuncRule, error) {
+	// YAML 解码后只做函数规则自身的必要字段检查；target 和版本范围的通用校验
+	// 在 File.Rules 中完成。看到 validate 较短，不代表整个规则格式没有其他约束。
 	var r InstFuncRule
 	if err := yaml.Unmarshal(data, &r); err != nil {
 		return nil, ex.Wrap(err)
@@ -115,6 +129,9 @@ func (r *InstFuncRule) validate() error {
 // type constraints — so no printable separator is truly reserved; the length
 // prefix marks where each value ends without relying on its content.
 func (r *InstFuncRule) Identity() string {
+	// 按行为生成稳定名称，而非用可重复的配置名称。新增影响生成代码的字段时，
+	// 需要同步这里，否则不同行为可能被误认为同一份生成物。
+	// 长度前缀先保证拼接编码无歧义，再用 CRC32 生成紧凑标识；CRC32 本身不是无碰撞哈希。
 	enc := func(s string) string { return strconv.Itoa(len(s)) + ":" + s }
 	encList := func(xs []string) string {
 		encs := make([]string, len(xs))

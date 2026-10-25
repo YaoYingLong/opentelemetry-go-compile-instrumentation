@@ -1,6 +1,9 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+// rule 包定义 YAML 配置进入工具后的数据模型，不负责执行观测逻辑。
+// 原始文件经解析与 Normalize 转成具体规则；setup 将命中的规则按包/文件归组，
+// instrument 再通过同一模型实施 AST 改写。新增组件通常复用现有模型而无需修改它。
 package rule
 
 import (
@@ -18,6 +21,9 @@ import (
 // to all versions of the target module. The left bound is inclusive, the right
 // bound is exclusive. For example, "v1.0.0,v2.0.0" means the rule is applicable
 // to the target module version range [v1.0.0, v2.0.0).
+// 中文导读：Go 接口通过方法集合隐式实现，无需写 implements。
+// 各具体规则嵌入 InstBaseRule 后获得这些公共方法，因此能作为 InstRule 统一加载，
+// 精确匹配时再用 type switch 区分函数、结构体、调用点等实际规则类型。
 type InstRule interface {
 	String() string      // The string representation of the rule
 	GetName() string     // The unique name of the rule
@@ -29,9 +35,12 @@ type InstRule interface {
 // FilterDef describes file predicates nested under where.file.
 //
 // The file predicate model currently supports implicit all-of across top-level
-// fields plus the explicit qualifier keys needed by the agreed surface. Runtime
-// support remains intentionally narrow: simple leaf predicates are supported,
-// while qualifier composition is validated but not yet executed.
+// fields plus the explicit qualifier keys needed by the agreed surface. The
+// setup phase compiles leaf predicates and all-of/one-of/not combinations into
+// executable filters.
+// 中文导读：当前 setup/filter.go 已支持 all-of/one-of/not 的递归执行，
+// 分别表示全部满足、至少一个满足和取反。扩展字段时仍需同时维护解析与执行。
+// IsTest 用 *bool 区分“不限制测试属性”与“明确要求非测试”。
 type FilterDef struct {
 	AllOf        []FilterDef `json:"all-of,omitempty"        yaml:"all-of,omitempty"`
 	OneOf        []FilterDef `json:"one-of,omitempty"        yaml:"one-of,omitempty"`
@@ -67,6 +76,9 @@ type WhereDef struct {
 }
 
 // InstBaseRule is the base rule for all instrumentation rules.
+// 中文导读：struct tag 分别控制 JSON 跨进程存储与 YAML 输入字段名；
+// omitempty 只控制编码时省略零值，不会自动校验字段是否必填。
+// Target 是包选择器，Version 是被插桩依赖的版本范围，Where 保留额外筛选条件。
 type InstBaseRule struct {
 	Name    string            `json:"name,omitempty"    yaml:"name,omitempty"`
 	Target  Target            `json:"target"            yaml:"target"`
@@ -86,6 +98,10 @@ func (ibr *InstBaseRule) GetWhere() *WhereDef { return ibr.Where }
 // organizing them by file and by the specific functions or structs they target.
 // This structure is essential for the instrumentation process, as it allows the
 // tool to efficiently locate and apply the correct rules to the source code.
+// 中文导读：这是匹配后发送给编译进程的工作单。
+// ModulePath 字段实际保存 NewInstRuleSet 收到的包 import path，不要被名字误导为 go.mod
+// 中的 module path；同一个 module 通常包含多个包，也就可能形成多个规则集合。
+// 各 map 用绝对源文件路径作键、规则指针切片作值；FileRules 则是按包增加文件的规则。
 type InstRuleSet struct {
 	PackageName    string                          `json:"package_name"`
 	ModulePath     string                          `json:"module_path"`
@@ -104,6 +120,8 @@ type InstRuleSet struct {
 }
 
 func NewInstRuleSet(importPath string) *InstRuleSet {
+	// map 的零值是 nil：读取安全，写入会 panic，因此构造时先 make 初始化各个映射。
+	// slice 的零值则可直接 append；这里显式创建空 FileRules 也让 JSON 空集合表达稳定。
 	return &InstRuleSet{
 		PackageName:    "",
 		ModulePath:     importPath,
@@ -134,6 +152,7 @@ func (irs *InstRuleSet) String() string {
 }
 
 func (irs *InstRuleSet) IsEmpty() bool {
+	// 调用点 ignore 标记也会影响编译期行为，所以只有标记而无普通规则时仍然不是空集。
 	return irs == nil ||
 		(len(irs.FuncRules) == 0 &&
 			len(irs.StructRules) == 0 &&
@@ -149,6 +168,8 @@ func (irs *InstRuleSet) IsEmpty() bool {
 // AddRule is a generic method that adds any type of rule to the appropriate map.
 // It works with any rule type that implements the InstRule interface.
 func addRule[T InstRule](file string, rule T, rulesMap map[string][]T) {
+	// 泛型参数 T 受 InstRule 约束，复用追加逻辑而保留具体规则类型的静态检查。
+	// append 可能返回新的底层数组，必须把结果写回 map，而不是仅调用 append。
 	util.Assert(filepath.IsAbs(file), "file must be an absolute path")
 	rulesMap[file] = append(rulesMap[file], rule)
 }

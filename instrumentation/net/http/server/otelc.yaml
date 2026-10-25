@@ -1,11 +1,16 @@
+# 中文导读：顶层 version 是读取本文件所需的最低 otelc 版本。
+# target/where 描述要改写的目标声明。
 version: "v1.0.0"
 
+# serverHandler 是 net/http 内部调度 Handler 的类型；在这里建 Span 可覆盖多个业务路由。
+# 不要把 recv 改成 http.Handler：这里匹配的是方法声明的 receiver，而不是接口的实现关系。
 server_hook:
   target: net/http
   where:
     func: ServeHTTP
     recv: serverHandler
   do:
+    # before 的三个原始参数是 receiver/w/r，after 无返回值参数；详见 server_hook.go。
     - inject_hooks:
         before: BeforeServeHTTP
         after: AfterServeHTTP

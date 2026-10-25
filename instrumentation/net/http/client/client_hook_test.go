@@ -27,6 +27,9 @@ import (
 	"go.opentelemetry.io/otelc/pkg/hook/hooktest"
 )
 
+// 中文导读：单元测试把 SDK SpanRecorder 装成全局 provider，在本进程直接调用 hook。
+// 它可以验证属性、上下文替换、错误处理和开关，但不证明编译器真的把 hook 注入了 net/http；
+// 后者由 test/integration/http_client_test.go 构建实际插桩程序并检查 OTLP 数据来验证。
 func setupTestTracer(t *testing.T) (*tracetest.SpanRecorder, *sdktrace.TracerProvider) {
 	t.Helper()
 	sr := tracetest.NewSpanRecorder()
@@ -38,6 +41,7 @@ func setupTestTracer(t *testing.T) (*tracetest.SpanRecorder, *sdktrace.TracerPro
 }
 
 func TestBeforeRoundTrip(t *testing.T) {
+	// 表驱动：每一项给出输入、环境和预期，覆盖禁用/导出器过滤/nil 等不能影响业务的旁路。
 	tests := []struct {
 		name            string
 		setupEnv        func(t *testing.T)
@@ -158,6 +162,7 @@ func TestBeforeRoundTrip(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Reset initialization for each test by creating a new once
+			// 生产中 Once 只初始化一次；测试每次更换 provider，必须避免继续使用上一个用例的 tracer。
 			initOnce = *new(sync.Once)
 
 			tt.setupEnv(t)
@@ -165,6 +170,7 @@ func TestBeforeRoundTrip(t *testing.T) {
 
 			req := tt.setupRequest()
 			mockCtx := hooktest.NewMockHookContext()
+			// mock 模拟编译器生成的桥接对象，不实际调用 Transport.RoundTrip，也不需要访问网络。
 			transport := &http.Transport{}
 
 			BeforeRoundTrip(mockCtx, transport, req)
@@ -187,6 +193,7 @@ func TestBeforeRoundTrip(t *testing.T) {
 				}
 
 				// Check that request was updated with new context
+				// 验证的是 SetParam 写入的替换请求，而非原始 req；下标 0 留给 Transport receiver。
 				newReq, ok := mockCtx.GetParam(1).(*http.Request)
 				require.True(t, ok, "param 1 should be request")
 				require.NotNil(t, newReq, "updated request should not be nil")
@@ -203,6 +210,8 @@ func TestBeforeRoundTrip(t *testing.T) {
 	}
 }
 
+// 出口测试先手工放入入口应产生的 hookData，再验证 End 后的状态和 exception 事件。
+// 特别区分 HTTP 404/500 状态与 Go error，并验证开关后来关闭时已创建的 Span 仍被结束。
 func TestAfterRoundTrip(t *testing.T) {
 	tests := []struct {
 		name         string

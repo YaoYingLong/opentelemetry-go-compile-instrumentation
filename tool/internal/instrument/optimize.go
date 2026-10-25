@@ -76,6 +76,11 @@ import (
 // Note that this optimization pass is fragile as it really heavily depends on
 // the structure of trampoline-jump-if and trampoline functions. Any change in
 // tjump should be carefully examined.
+//
+// 中文导读：这是 otelc 在写出 Go 文件前做的 AST 简化，不是在应用每次调用时
+// 再判断是否优化。保留 if/else 骨架也不代表最终机器码保留同样分支；后面的
+// Go 编译器会继续常量传播、删除不可达代码。读生成代码时看到 if false，
+// 应结合本文件理解其来源，而不是把它误认为规则没有执行。
 
 // tJump describes a trampoline-jump-if optimization candidate
 type tJump struct {
@@ -120,6 +125,9 @@ func removeAfterTrampolineCall(tjump *tJump) error {
 // populates its Params && ReturnValues field with addresses of all arguments.
 // The HookContextImpl structure is used to pass arguments to the exit trampoline
 func newHookContextImpl(tjump *tJump) dst.Expr {
+	// 中文导读：仅有 After 的规则不需要 Before trampoline，但仍需创建
+	// 一份调用级 HookContext 来保存地址，再交给 defer After 使用。
+	// 这里生成的是 &HookContextImpl{...} 表达式；真正分配发生在应用调用时。
 	targetFunc := tjump.target
 	structName := trampolineHookContextImplType + tjump.rule.Identity()
 
@@ -203,6 +211,10 @@ func removeAfterTrampolineDecl(targetFile *dst.File, tjump *tJump) error {
 // 1. SetSkipCall is never called (so skip is always false)
 // 2. The HookContext parameter is only used as a receiver for method calls
 func canFlattenTJump(hookFunc *dst.FuncDecl) bool {
+	// 中文导读：只有能从 hook 源码保守判断“不可能设置 skip”才删除短路分支。
+	// 直接引用 SetSkipCall（包括保存方法值）会阻止优化；把 ctx 传给其他函数、
+	// 存进变量等逃逸也会阻止，因为别处可能设置 skip。这是语法树级检查，
+	// 不是 Go 编译器的完整逃逸分析或跨函数数据流分析。
 	if hookFunc.Type == nil || hookFunc.Type.Params == nil || len(hookFunc.Type.Params.List) == 0 {
 		return true
 	}
@@ -354,6 +366,9 @@ func stripTJumpLabel(tjump *tJump) {
 }
 
 func (ip *instrumentPhase) optimizeTJumps() error {
+	// 中文导读：先移除没有配置的 After/Before 调用，再尝试消除不需要的
+	// skip 分支。多个规则的入口跳转可能嵌套在 else 中，所以不能随意把
+	// 整个 else 删掉；改变入口模板时必须同步核对这里依赖的节点结构。
 	for _, tjump := range ip.tjumps {
 		mustTJump(tjump.ifStmt)
 		// Strip the trampoline-jump-if anchor label as no longer needed

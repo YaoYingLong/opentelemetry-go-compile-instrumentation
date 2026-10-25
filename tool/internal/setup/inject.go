@@ -1,6 +1,8 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+// 原始应用的编译计划只包含它本来依赖的包；导入 hook 后，依赖图会扩张。
+// 本文件将新出现的包重新交给规则匹配，直到没有新包或新匹配，形成依赖闭包。
 package setup
 
 import (
@@ -19,6 +21,8 @@ import (
 // hookPackagePaths returns the packages otelc.runtime.go blank-imports for the
 // given rules, which is every hook package those rules name.
 func hookPackagePaths(matched []*rule.InstRuleSet) []string {
+	// 函数规则与文件规则通过 Path 引入 hook 包。按 import path 去重，
+	// 一个组件的多个函数命中不应反复加载相同 hook 依赖图。
 	seen := make(map[string]bool)
 	paths := make([]string, 0)
 	add := func(path string) {
@@ -47,6 +51,8 @@ func injectedDeps(
 	known map[string]bool,
 	buildFlags []string,
 ) ([]*Dependency, error) {
+	// 这里用 go/packages 遍历 hook 包的传递依赖；它补齐的是原 dry-run 尚未见到的包。
+	// known 是调用方共享的集合，访问成功后立即标记，防止环形依赖/重复路径反复处理。
 	if len(hookPaths) == 0 {
 		return nil, nil
 	}
@@ -67,6 +73,8 @@ func injectedDeps(
 
 	deps := make([]*Dependency, 0)
 	var loadErr error
+	// Visit 的第二个回调为前序访问，第三个为后序访问；这里仅使用后序回调。
+	// Load 的顶层 error 为空不保证每个包均成功，故还要检查 pkg.Errors。
 	packages.Visit(pkgs, nil, func(pkg *packages.Package) {
 		// packages.Load can return a nil top-level error while reporting
 		// failures on individual packages in the closure. Walking past one
@@ -113,6 +121,9 @@ func runInjectionPasses(
 	known map[string]bool,
 	pass injectionPass,
 ) ([]*rule.InstRuleSet, error) {
+	// 例如：应用命中规则 A → A 的 hook 引入包 B → B 命中规则 C → C 又引入包 D。
+	// 每一轮只从“本轮新匹配”的 hook 出发，known 记录之前所有包，直到达到不动点。
+	// 若出现新包却没有新规则，也可结束：这些包已遍历完，不会再引入新规则的 hook。
 	extra := make([]*rule.InstRuleSet, 0)
 	for {
 		injected, err := pass.load(ctx, hookPackagePaths(matched), known)
@@ -161,6 +172,9 @@ func (sp *setupPhase) matchInjectedDeps(
 	moduleDirs []string,
 	buildFlags []string,
 ) ([]*rule.InstRuleSet, error) {
+	// 这里刻意区分两类失败：补充图加载失败时输出警告并保留原始计划；
+	// 已加载包的规则匹配失败则向上返回错误。前者可能导致新注入依赖漏插桩，
+	// 因此看到构建成功时，仍应留意相应 Warning 与 matched.json。
 	known := make(map[string]bool, len(deps))
 	for _, dep := range deps {
 		known[dep.ImportPath] = true

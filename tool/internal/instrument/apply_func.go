@@ -82,6 +82,10 @@ func syntheticNamer(funcDecl *dst.FuncDecl, hash string) func(prefix string) str
 }
 
 func collectReturnValues(funcDecl *dst.FuncDecl, hash string) []string {
+	// 中文导读：After 必须拿到“最终会返回的那组变量”的地址，所以把匿名结果
+	// 命名，把 _ 换成唯一名字。Go 的 return expr 会先写入具名结果，再执行
+	// defer；After 因而能读取结果，也能在函数真正返回前通过地址改写它。
+	// 这里改的是签名 AST，不是运行时通过反射遍历返回值。
 	// Add explicit names for return values, they can be further referenced if
 	// we're willing
 	var retVals []string // nil by default
@@ -113,6 +117,10 @@ func collectReturnValues(funcDecl *dst.FuncDecl, hash string) []string {
 }
 
 func collectArguments(funcDecl *dst.FuncDecl, hash string) []string {
+	// 中文导读：接收者也算 hook 参数，且固定排在索引 0；普通函数则从第一个
+	// 显式参数开始。例：func (c *Client) Do(ctx context.Context) 中，
+	// GetParam(0) 对应 c、GetParam(1) 对应 ctx。匿名参数和 _ 必须先命名，
+	// 因为后续生成 &参数，而 Go 不允许取空白标识符 _ 的地址。
 	args := make([]string, 0)
 	next := syntheticNamer(funcDecl, hash)
 	if ast.HasReceiver(funcDecl) {
@@ -157,6 +165,9 @@ func collectArguments(funcDecl *dst.FuncDecl, hash string) []string {
 }
 
 func createTrampArgs(names []string) []dst.Expr {
+	// 中文导读：传递的是原函数局部参数/结果变量的地址，而非简单复制其值。
+	// 若原类型已经是 *Client，这里得到 **Client，可替换该局部指针本身；
+	// 这与仅修改 Client 指向对象的字段是两种不同的操作。
 	exprs := make([]dst.Expr, 0, len(names))
 	for _, name := range names {
 		util.Assert(name != ast.IdentIgnore, "must be processed before")
@@ -168,6 +179,12 @@ func createTrampArgs(names []string) []dst.Expr {
 func createTJumpIf(file *dst.File, t *rule.InstFuncRule, funcDecl *dst.FuncDecl,
 	args, retVals []string,
 ) *dst.IfStmt {
+	// 中文导读：下面构造的 AST 会在“应用运行时”执行。Before 返回的 skip
+	// 为 true 时，先调用 After，再直接返回具名结果，原函数体完全不执行；
+	// 否则注册 defer After 后继续原函数体。defer 注册时就保存结果变量地址，
+	// 所以调用 After 时读到的是稍后写入的结果，而非注册 defer 时的零值。
+	// 原函数 panic 展开栈时也会执行已注册的 After；trampoline 对自身 hook
+	// panic 的 recover 不会因此吞掉原函数的 panic，也没有把该 panic 作为参数传入。
 	funcSuffix := t.Identity()
 	argsToBefore := createTrampArgs(args)
 	argsToAfter := createTrampArgs(retVals)
@@ -201,6 +218,11 @@ func createTJumpIf(file *dst.File, t *rule.InstFuncRule, funcDecl *dst.FuncDecl,
 }
 
 func (ip *instrumentPhase) insertToFunc(funcDecl *dst.FuncDecl, tjump *dst.IfStmt) {
+	// 中文导读：同一目标可匹配多条 func 规则，新的入口跳转嵌入前一条的
+	// else 中；只有前面的规则允许继续，才会进入后面的规则。已经注册的
+	// After 遵守 Go defer 的后进先出顺序，形成类似嵌套拦截器的退出顺序。
+	// 首次插入还会生成 line 指令，将注入部分标为 generated，再把原语句
+	// 映射回原文件行号，让调试器和错误堆栈尽量保留用户熟悉的源码位置。
 	found := false
 	if len(funcDecl.Body.List) > 0 {
 		firstStmt := funcDecl.Body.List[0]
@@ -310,6 +332,9 @@ func (ip *instrumentPhase) addCompileArg(newArg string) {
 var templateAPI string
 
 func (ip *instrumentPhase) writeGlobals(pkgName string) error {
+	// 中文导读：把共享 HookContext 接口和模板级变量写成独立的包内 Go 文件，
+	// 并加到 compile 参数。各条规则专用的 HookContextImpl 与 trampoline
+	// 则追加在改写的目标文件中；这个 globals 文件不是一个额外的运行时包。
 	// Prepare trampoline code header
 	p := ast.NewAstParser()
 	trampoline, err := p.ParseSource("package " + pkgName)
@@ -338,6 +363,9 @@ func (ip *instrumentPhase) writeGlobals(pkgName string) error {
 }
 
 func (ip *instrumentPhase) writeInstrumented(root *dst.File, oldFile string) error {
+	// 中文导读：常规源码写到 Go 构建工作目录，compile 改用该路径，用户文件
+	// 本身不因这次 AST 改写而保存。cgo 文件通常已在同一工作目录，可能原位
+	// 写回，因此先复制出 vet 专用版本。keepForDebug 另留调试副本便于对照。
 	// Write the instrumented AST to the new file in the working directory
 	newFile := filepath.Join(ip.workDir, filepath.Base(oldFile))
 	if strings.HasSuffix(oldFile, ".cgo1.go") {
@@ -397,6 +425,9 @@ func (ip *instrumentPhase) parseFile(file string) (*dst.File, error) {
 func (ip *instrumentPhase) applyFuncRule(ctx context.Context, rule *rule.InstFuncRule, root *dst.File,
 	funcDecl *dst.FuncDecl, found bool,
 ) (bool, error) {
+	// 中文导读：组件作者提供目标签名和 Before/After，框架负责把规则变成
+	// trampoline。Identity 用于生成名字并在包内去重，不只是日志中的规则名；
+	// 导入仍先处理，避免两条等价规则声明不同 imports 时漏掉所需依赖。
 	if !found {
 		return false, ex.Newf("can not find function %s", rule.Func)
 	}

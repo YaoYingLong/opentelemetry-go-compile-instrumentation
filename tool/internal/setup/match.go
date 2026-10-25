@@ -1,6 +1,10 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+// 规则匹配是逐层缩小候选范围：规则来源 → target 包路径 → 版本 → where.file → AST。
+// setup 的产物描述“哪个文件应用哪些规则”，不会在此处重写用户函数体。
+// 对照 Java instrumentation 时，可把这一层理解为构建期间的匹配器，
+// 而具体 AST 改写更接近后续的 Advice/字节码织入步骤，但作用对象是 Go 源码。
 package setup
 
 import (
@@ -60,6 +64,9 @@ func parseRuleFile(ctx context.Context, file string, content []byte, otelcVersio
 }
 
 func matchVersion(dependency *Dependency, rule rule.InstRule) bool {
+	// 空范围匹配所有版本；单个 v1.2.3 表示 >= v1.2.3，而不是只匹配该版本。
+	// 两个版本用逗号分隔时表示左闭右开区间，如 [v1.2.3, v2.0.0)。
+	// 这里比较的是被插桩依赖的版本，与规则文件声明的最低 otelc 版本是两回事。
 	return util.VersionInRange(dependency.Version, rule.GetVersion())
 }
 
@@ -137,6 +144,8 @@ func (sp *setupPhase) runMatch(
 	exactRules map[string][]rule.InstRule,
 	globRules []targetRule,
 ) (*rule.InstRuleSet, error) {
+	// 新建的 set 即使暂时没有命中普通规则，也可能保存 //otelc:ignore 调用标记；
+	// 不能只检查函数规则数量来判断一个 set 是否有意义，应使用 IsEmpty。
 	set := rule.NewInstRuleSet(dep.ImportPath)
 
 	if len(dep.CgoFiles) > 0 {
@@ -193,6 +202,8 @@ func (sp *setupPhase) runMatch(
 		preciseRules = append(preciseRules, r)
 	}
 
+	// 文件规则在包路径与版本通过后直接纳入；函数、结构体等才需要逐源码确认声明。
+	// 不同规则类型的“命中”深度不同，不能笼统理解为这里完成了所有类型的最终匹配。
 	if len(preciseRules) == 0 {
 		if !set.IsEmpty() && len(dep.Sources) > 0 {
 			name, err := ast.ParsePackageName(dep.Sources[0])
@@ -228,6 +239,8 @@ func (sp *setupPhase) preciseMatching(
 	rules []rule.InstRule,
 	set *rule.InstRuleSet,
 ) (*rule.InstRuleSet, error) {
+	// dst（decorated syntax tree）保留注释等装饰信息；此阶段只读，所以用快速解析。
+	// 后续 instrument 阶段还会为真正改写重新解析，不把整棵树跨进程序列化。
 	if len(dep.Sources) == 0 {
 		return set, nil
 	}
@@ -355,6 +368,9 @@ func (sp *setupPhase) matchOneRule(
 	set *rule.InstRuleSet,
 	dep *Dependency,
 ) error {
+	// Go 的 type switch 通过接口中实际存放的指针类型分派规则。
+	// 函数规则查声明；call/literal 规则先登记到文件，等 instrument 解析 import 别名后
+	// 再判断具体表达式是否匹配。因此 matched.json 含某规则不等于每个文件都会被改写。
 	switch rt := r.(type) {
 	case *rule.InstFuncRule:
 		_, ok, err := ast.FindFuncDecl(tree, rt, sp.resolvedNames)
@@ -474,6 +490,8 @@ func loadCustomRuleFile(
 }
 
 func loadCustomRules(ctx context.Context, ruleConfig, otelcVersion string) ([]rule.InstRule, error) {
+	// 自定义规则可列出多个文件或目录。覆盖单位是 YAML 条目的名字，
+	// 一个条目经 Normalize 展开出的多个操作要整体覆盖，保留 do 序列内部顺序。
 	// Deduplicate by YAML-entry name. A single entry can expand into several
 	// rules (e.g. a do: sequence with multiple modifiers), all sharing that
 	// name, so each name maps to the full slice of rules it produced. When two
@@ -520,6 +538,8 @@ func loadRulesFromToolFiles(
 	toolFiles []string,
 	otelcVersion string,
 ) ([]rule.InstRule, error) {
+	// 工具配置文件的 blank imports 声明组件选择；组件所在目录内的规则文件才提供行为。
+	// walkInstrumentation 还会递归其模块工具配置，从而支持组件聚合与嵌套依赖。
 	ruleSet := make([]rule.InstRule, 0)
 	// Two imports can find the same rule file. For example, the walk of the
 	// directory of "a/b" also finds the rule files of the sub-package "a/b/c".
@@ -588,6 +608,8 @@ func ruleFileKey(path string) string {
 }
 
 func (sp *setupPhase) loadRules(ctx context.Context, moduleDirs []string) ([]rule.InstRule, error) {
+	// 来源是互斥的优先级选择：OTELC_RULES > --rules > 模块的工具配置文件。
+	// 设置自定义来源不会自动再合并默认组件规则；迁移组件或排查遗漏时先检查这一点。
 	// Load rules from environment variable OTELC_RULES if specified. It has the
 	// highest priority.
 	rulePath := os.Getenv(util.EnvOtelcRules)
@@ -622,6 +644,8 @@ func (sp *setupPhase) matchDeps(
 	deps []*Dependency,
 	moduleDirs []string,
 ) ([]*rule.InstRuleSet, error) {
+	// 精确路径先建只读索引，glob/$root/列表则逐依赖求值；
+	// $root 指当前构建入口所属模块，不是依赖模块，也不是任意文件系统目录。
 	// Construct the set of default allRules by parsing embedded data
 	allRules, err := sp.loadRules(ctx, moduleDirs)
 	if err != nil {
@@ -662,6 +686,9 @@ func (sp *setupPhase) matchDeps(
 
 	// Match the default rules with the found dependencies
 	matched := make([]*rule.InstRuleSet, 0)
+	// goroutine 是轻量并发任务；errgroup 汇总首个错误并取消同组 context。
+	// 规则索引只读，各任务独占自己的 set；共享切片 matched 的 append 才需要互斥锁。
+	// 任务完成顺序不固定，调用者不应把 set 的排列顺序理解为跨包执行顺序。
 	var mu sync.Mutex
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(runtime.NumCPU() * matchDepsConcurrencyMultiplier)

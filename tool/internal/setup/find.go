@@ -1,6 +1,9 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+// 本文件从 Go 自己输出的 dry-run 计划恢复“究竟会编译哪些源码”。
+// 这比只读 go.mod 更细：go.mod 管模块版本，compile 命令则包含包路径、构建标签
+// 筛选后的文件、测试变体及 cgo 生成输入，是后续规则匹配的实际依据。
 package setup
 
 import (
@@ -21,6 +24,9 @@ const maxBuildPlanBufferSize = 10 * 1024 * 1024 // 10MB
 //nolint:gochecknoglobals // allows us to mock exec.CommandContext in tests
 var execCommandContext = exec.CommandContext
 
+// Dependency 表示一次编译输入中的 Go 包，而非整个第三方 module。
+// ImportPath 来自编译器 -p，Sources 使用绝对路径；同一个 import path 在普通构建
+// 和测试构建中可能有不同源文件集合，因此不能只按 ImportPath 对编译计划去重。
 type Dependency struct {
 	ImportPath string
 	Version    string
@@ -92,6 +98,8 @@ func disableJSONOutput(subcommand string, args []string) []string {
 // listBuildPlan lists the build plan by running `go build -a -x -n`
 // and then filtering the commands (cd, cgo, compile) from the build plan log.
 func listBuildPlan(ctx context.Context, subcommand string, cmdArgs []string) ([]string, error) {
+	// -n 只打印不执行，-x 输出工具命令，-a 让已缓存的包也出现在计划中。
+	// 因此这里不是先完整编译一次；真正编译发生在 setup 完成后的 toolexec 阶段。
 	const buildPlanLogName = "build-plan.log"
 
 	logger := util.LoggerFromContext(ctx)
@@ -168,6 +176,9 @@ func resolveCgoFile(cgoFile, sourceDir string) (string, error) {
 var versionRegexp = regexp.MustCompile(`@v\d+\.\d+\.\d+([-+][^/]*)?/`)
 
 func findModVersion(path string) string {
+	// 版本由模块缓存路径中的 @vX.Y.Z 提取，而非根据包名猜测。
+	// 标准库、主模块、本地 replace 或 vendor 源码通常没有这一段，返回空版本；
+	// 有版本下限的规则不会把“无法确认版本”当作符合条件，排查未命中时要检查来源。
 	version := versionRegexp.FindString(filepath.ToSlash(path))
 	if version == "" {
 		return ""
@@ -178,6 +189,8 @@ func findModVersion(path string) string {
 // findGoSources extracts Go source files from compile command arguments,
 // resolving CGO files using the provided objDir->sourceDir mapping.
 func findGoSources(ctx context.Context, args []string, cgoObjDirs map[string]string) (*Dependency, error) {
+	// dry-run 尚未生成 cgo 的 .cgo1.go 文件，因此不能仅凭文件不存在就丢弃该包。
+	// 先把生成文件映回原始 .go，再保留原文件 → cgo 文件名的映射供编译阶段使用。
 	logger := util.LoggerFromContext(ctx)
 
 	dep := &Dependency{
@@ -227,6 +240,8 @@ func findGoSources(ctx context.Context, args []string, cgoObjDirs map[string]str
 
 // findDeps finds dependencies by listing the build plan.
 func findDeps(ctx context.Context, subcommand string, cmdArgs []string) ([]*Dependency, error) {
+	// 按计划顺序处理 cd/cgo/compile：cd 提供 cgo 原目录，cgo 提供 -objdir，
+	// 随后的 compile 才能把尚不存在的生成文件追溯到可读取的原始源码。
 	logger := util.LoggerFromContext(ctx)
 
 	buildPlan, err := listBuildPlan(ctx, subcommand, cmdArgs)

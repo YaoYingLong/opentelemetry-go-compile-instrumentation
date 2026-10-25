@@ -1,6 +1,8 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+// 规则文件有两个独立维度：顶层 version 限制工具版本，每条规则的 version
+// 限制目标依赖版本。本文件负责解析前者，并把条目交给 Normalize 生成可执行规则。
 package rule
 
 import (
@@ -30,6 +32,9 @@ type File struct {
 }
 
 func ParseFile(data []byte) (File, error) {
+	// 先解成 yaml.Node，保留每个条目的结构，再按名字排序；不直接解为 map，
+	// 是为了显式校验重复键、顶层类型与 version，并让条目处理顺序可预测。
+	// 没写顶层 version 的文件走 legacy 路径，匹配加载阶段会对此给出提示。
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return File{}, err
@@ -80,6 +85,9 @@ func ParseFile(data []byte) (File, error) {
 
 // Rules constructs the executable instrumentation rules in this file.
 func (f File) Rules() ([]InstRule, error) {
+	// Normalize 兼容规则表面语法并展开组合条目：一个 YAML 名字可能产生多条规则。
+	// 每条归一化结果再按选择器创建具体结构，统一检查 target 与依赖版本范围。
+	// 新组件开发应先对照已有组件当前配置，不能直接把旧设计文档中的示例当格式规范。
 	rules := make([]InstRule, 0)
 	for _, entry := range f.Entries {
 		var fields map[string]any
@@ -115,6 +123,8 @@ func (f File) Rules() ([]InstRule, error) {
 }
 
 func newRule(raw []byte, name string, fields map[string]any) (InstRule, error) {
+	// 规则类型取决于归一化后的 selector，不取决于 YAML 条目名或 hook 函数名。
+	// switch 分支顺序是实现的一部分；新增语法需确认 Normalize 与这里的分派保持一致。
 	switch {
 	case fields[selStruct] != nil:
 		return NewInstStructRule(raw, name)
@@ -138,6 +148,8 @@ func newRule(raw []byte, name string, fields map[string]any) (InstRule, error) {
 }
 
 func CheckVersion(current, required string) error {
+	// 开发构建/伪版本无法可靠按正式发布版本判断兼容性，此处放行。
+	// 这只影响工具最低版本检查，不意味着函数/包选择或依赖版本筛选也会被跳过。
 	if !semver.IsValid(current) || current == "v0.0.0" || module.IsPseudoVersion(current) {
 		return nil
 	}

@@ -14,6 +14,8 @@ import (
 
 // load loads the matched rules from the build temp directory.
 // TODO: Shared memory across all sub-processes is possible
+// 中文导读：setup 与 compile 拦截是不同阶段/进程，靠构建临时目录中的 JSON
+// 传递已解析的规则；这里并不重新扫描所有 instrumentation 目录做规则发现。
 func (ip *instrumentPhase) load() ([]*rule.InstRuleSet, error) {
 	f := util.GetMatchedRuleFile()
 	content, err := os.ReadFile(f)
@@ -65,6 +67,10 @@ func loadImportNames() (map[string]string, error) {
 }
 
 // match matches the rules with the compile command.
+// 中文导读：此处匹配的是 compile -p 指定的包导入路径。字段虽叫 ModulePath，
+// 此处用途是与编译包路径比较，不要将它理解成只匹配 go.mod 的 module 根路径。
+// setup 已筛过函数名、接收者、版本等条件；当前先取对应包的规则集，应用时
+// 还需在重新解析的 AST 中定位目标函数，不能直接跨进程复用旧语法树节点。
 func (ip *instrumentPhase) match(allSet []*rule.InstRuleSet, args []string) *rule.InstRuleSet {
 	// One package can only be matched with one rule set, so it's safe to return
 	// the first matched rule set.

@@ -1,6 +1,9 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+// 状态管理使构建前的临时修改可以回滚：文件内容快照 + 原始存在性清单。
+// 这不是 git 工作区回退，不会依据版本库 HEAD 覆盖用户未提交内容；
+// 恢复基准是每个文件第一次被 Track 时的真实状态。
 package setup
 
 import (
@@ -31,6 +34,9 @@ const (
 // they are later created.
 //
 // stateManager is not safe for concurrent use.
+// 中文导读：map 的 bool 同时区分“原来存在”和“原来不存在”；
+// 因此查询时要用 value, ok := map[key]，不能把 false 误认为“尚未登记”。
+// 跨进程的构建锁负责保护整个构建生命周期，本结构自身不提供 goroutine 并发安全。
 type stateManager struct {
 	files map[string]bool // true = existed when tracked
 }
@@ -76,6 +82,8 @@ func loadStateManager() (*stateManager, error) {
 	return s, nil
 }
 
+// 使用包内私有空结构体作为 context key，避免别的包用同名字符串覆盖这个值。
+// struct{} 不携带业务字段；context 在这里只传播当前构建的状态管理器指针。
 type stateManagerKey struct{}
 
 // contextWithStateManager returns a copy of ctx containing s.
@@ -96,6 +104,8 @@ func stateManagerFromContext(ctx context.Context) (*stateManager, bool) {
 }
 
 func getBackupFiles(ctx context.Context, moduleDirs []string) ([]string, error) {
+	// 自动 pin 可能修改 go.mod/go.sum 和组件清单，工作区模式还可能更新 go.work.sum。
+	// go.sum 不存在也要登记，这样本次新生成的文件会在清理时删除。
 	var files []string
 
 	dirs := normalizeModuleDirs(moduleDirs)
@@ -137,6 +147,8 @@ func getBackupFiles(ctx context.Context, moduleDirs []string) ([]string, error) 
 }
 
 func stateSnapshotPath(path string) string {
+	// 多模块工程可能同时有多个 go.mod；只按 basename 备份会覆盖彼此。
+	// 文件名保留可读部分，再加完整路径的 SHA-256 摘要，区分不同目录的同名文件。
 	p := filepath.Clean(path)
 	sum := sha256.Sum256([]byte(p))
 	return filepath.Base(p) + "." + hex.EncodeToString(sum[:])
@@ -163,6 +175,9 @@ func (s *stateManager) TrackAll(paths ...string) error {
 //
 // Duplicate calls for the same path are ignored.
 func (s *stateManager) Track(path string) error {
+	// 每次成功登记都立即持久化，不等整个 setup 完成才保存。
+	// 返回后调用方才能安全修改文件；若后来进程异常退出，独立 cleanup 仍能找到清单。
+	// 重复 Track 保留最初状态，避免把已经修改后的文件再次当作原始快照。
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return ex.Wrapf(err, "failed to get absolute path for %s", path)
@@ -196,6 +211,8 @@ func (s *stateManager) Track(path string) error {
 // Track calls Commit automatically; calling it directly is only needed to
 // re-persist after external changes.
 func (s *stateManager) Commit() error {
+	// 清单中普通路径表示“恢复快照”，前缀 '-' 表示“原来不存在，应删除”。
+	// map 遍历顺序不稳定，排序后再输出，使磁盘结果稳定且便于比较。
 	if len(s.files) == 0 {
 		return nil
 	}
@@ -230,6 +247,7 @@ func (s *stateManager) Commit() error {
 // successful Revert: the state is consumed, and leaving it behind would let a
 // later `otelc cleanup` re-apply snapshots from a finished build.
 func (s *stateManager) Discard() error {
+	// 先成功 Revert，再删除恢复依据；恢复失败时必须保留快照，不能为了清理干净而丢失数据。
 	if len(s.files) == 0 {
 		return nil
 	}
@@ -249,6 +267,8 @@ func (s *stateManager) Discard() error {
 // Files that originally existed are restored from their snapshots. Files that
 // did not exist when tracked are removed if they exist.
 func (s *stateManager) Revert() error {
+	// ex.Join 累积错误而不是首错即停：一个文件恢复失败，仍尝试恢复其他文件。
+	// 调用方据最终错误决定是否能 Discard；这个函数自己不删除状态清单。
 	if len(s.files) == 0 {
 		return nil
 	}

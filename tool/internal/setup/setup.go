@@ -1,6 +1,10 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+// Package setup 实现编译期插桩的第一阶段：分析用户构建、选择组件、匹配规则，
+// 并生成第二阶段需要的运行时导入文件和 matched.json。这里的“运行时文件”仍是
+// 在构建前生成的 Go 源码；真正改写目标函数由 internal/instrument 在编译回调中完成。
+// 建议阅读顺序：GoBuild → setupLocked → findDeps → matchDeps → addDeps → store。
 package setup
 
 import (
@@ -24,6 +28,9 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
+// setupPhase 保存一次准备过程的公共信息，不是最终应用中的运行时状态。
+// *packages.Package 是 go/packages 的包描述：import path、模块、源码和依赖图等；
+// 它不同于一个 Go module，也不同于某次 compile 命令对应的 Dependency。
 type setupPhase struct {
 	logger          *slog.Logger
 	ruleConfig      string
@@ -32,6 +39,7 @@ type setupPhase struct {
 	rootModulePaths []string
 	// resolvedNames maps an import path to a package name, built from
 	// buildPackages' dependency graph.
+	// import path 的末段不一定等于 package 声明，故后续签名匹配需要真实包名表。
 	resolvedNames map[string]string
 }
 
@@ -66,6 +74,7 @@ func keepForDebug(ctx context.Context, srcPath string) {
 
 // This function can be used to check if the setup has been completed.
 func isSetup() bool {
+	// 当前始终返回 false：不要把下面的短路分支理解成已经实现了 setup 缓存。
 	// TODO: Implement Task
 	return false
 }
@@ -122,6 +131,10 @@ func lastFileTargetIndex(subcommand string, args []string) int {
 //   - args ["-a", ".", "./cmd"] returns packages for both "." and "./cmd"
 //   - args [] returns packages for "."
 //
+// 中文导读：这里加载“构建入口及其依赖图”，供模块定位和包名解析使用。
+// 后面的 findDeps 则从 dry-run 编译计划获取每次编译实际输入的源文件；
+// 两者互补，尤其 go test 的包变体不能直接当作普通包写入生成文件。
+// packages.Need* 是位标志，用按位或组合要加载的信息，避免无谓加载完整类型信息。
 //nolint:revive // needed to balance confusing-results and nonamedreturns linters
 func getBuildPackages(
 	ctx context.Context,
@@ -249,6 +262,7 @@ func splitBuildTargets(subcommand string, args []string) ([]string, []string, er
 }
 
 func rootModulePaths(ctx context.Context, pkgs []*packages.Package) ([]string, error) {
+	// 一个构建可跨多个模块。$root 应相对这些入口所属模块展开，而非仅相对当前目录。
 	roots := make(map[string]bool)
 	for _, pkg := range pkgs {
 		if pkg.Module != nil && pkg.Module.Path != "" {
@@ -277,6 +291,8 @@ func (sp *setupPhase) generateRuntimePerPackage(
 	pkgs []*packages.Package,
 	matched []*rule.InstRuleSet,
 ) error {
+	// 每个真实构建入口包都接收自己的生成文件；_test 包变体已在 getBuildPackages 排除。
+	// 文件使用入口包的 package 名，导入已匹配的 hook，使链接器能看到对应运行时代码。
 	for _, pkg := range pkgs {
 		pkgDir := pkgload.PackageDir(pkg)
 		if pkgDir == "" {
@@ -340,12 +356,16 @@ func resolveImportPath(ctx context.Context, buildFlags []string, pkgDir string) 
 // under the build lock; when invoked from GoBuild the surrounding lock is
 // reused via the context marker instead of re-acquired.
 func Setup(ctx context.Context, cmd *cli.Command) error {
+	// 共享同一 otelc 工作目录的构建通过文件锁串行化，保护共用的临时状态。
+	// GoBuild 已持锁时，context 中的标记让嵌套 Setup 复用锁，避免自身死锁。
 	return withBuildLock(ctx, func(ctx context.Context) error {
 		return setupLocked(ctx, cmd)
 	})
 }
 
 func setupLocked(ctx context.Context, cmd *cli.Command) error {
+	// 第一阶段主流程：保留原始构建语义 → 加载包图 → 自动 pin（若未自选规则）→
+	// 读取编译计划 → 匹配规则 → 补齐 hook 带入的依赖 → 生成导入文件 → 持久化结果。
 	// Since Setup can be invoked in different contexts (i.e, via `otelc setup` or as part of `otelc go build`),
 	// we need to handle the arguments accordingly. If the command is `go build` or `go install`, we should trim the first argument
 	args := cmd.Args().Slice()
@@ -420,6 +440,8 @@ func setupLocked(ctx context.Context, cmd *cli.Command) error {
 
 	// Auto-pin generates/updates otel.instrumentation.go file
 	var deps []*Dependency
+	// 自定义规则意味着用户已决定规则来源，跳过自动选择组件。
+	// 默认路径下 autoPin 会先备份模块文件，再维护工具声明、组件导入及模块依赖。
 	if sp.ruleConfig == "" && os.Getenv(util.EnvOtelcRules) == "" {
 		pinResult, pinErr := autoPin(ctx, moduleDirs, subcommand, args)
 		if pinErr != nil {
@@ -466,6 +488,9 @@ func setupLocked(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
+	// matched.json 是两个阶段的进程间契约，不是完整原始规则列表：
+	// 里面已带有匹配到的包/绝对源文件路径，以及 hook import path 解析出的本地目录。
+	// 编译回调据此定位规则，避免每个编译子进程重新遍历全工程。
 	// Write the matched ruleset to matched.json for further instrument phase
 	return sp.store(ctx, matched, moduleDirs)
 }
@@ -499,6 +524,8 @@ func setupGoCache(ctx context.Context, env []string) ([]string, error) {
 //   - -race -race=false (result: -race=false)
 //   - -race=false -race (result: -race)
 func extractBuildFlags(subcommand string, args []string) []string {
+	// 包加载和后续归档解析必须使用与实际构建相同的 tags、race、overlay 等上下文；
+	// 否则 setup 看见的文件、签名甚至依赖包可能与编译阶段不同。
 	if subcommand == "" {
 		subcommand = subcmdBuild
 	}
@@ -592,6 +619,8 @@ func addBuildFlags(args []string, flags ...string) []string {
 // tested directly; buildWithToolexec cannot be, since it would spawn a go
 // build whose -toolexec target is the test binary itself.
 func toolexecBuildArgs(args []string, execPath string, vendored bool) ([]string, error) {
+	// -toolexec 把“启动 compile/link 等工具”的动作交给 otelc 包装，
+	// -work 保留 Go 构建工作目录，供插桩阶段使用编译参数和调试生成结果。
 	insert, err := toolexecInsertArg(execPath)
 	if err != nil {
 		return nil, err
@@ -709,6 +738,8 @@ func GoBuild(ctx context.Context, cmd *cli.Command) error {
 }
 
 func runGoBuild(ctx context.Context, cmd *cli.Command) error {
+	// 完整生命周期处于同一把构建锁之下，恢复也必须先于解锁发生。
+	// 这和 Java 启动时 attach agent 不同：应用二进制生成之前，hook 已经参与编译与链接。
 	ctx = contextWithStateManager(ctx, newStateManager())
 	logger := util.LoggerFromContext(ctx)
 
@@ -716,6 +747,8 @@ func runGoBuild(ctx context.Context, cmd *cli.Command) error {
 	// to prevent stale data from affecting this build.
 	instrument.CleanupImportTrackingFiles()
 
+	// Go 的 defer 在函数返回时执行，因此 setup 或实际编译返回错误也会进入清理。
+	// 进程被强杀时 defer 无法执行，stateManager 的磁盘清单提供后续手动恢复依据。
 	defer func() {
 		// Restore backed-up go.mod/go.sum but keep .otelc-build/ for debugging.
 		// Users can run `otelc cleanup` to remove it explicitly. Deferred

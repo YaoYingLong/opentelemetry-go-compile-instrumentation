@@ -22,6 +22,9 @@ import (
 // hits while walking the files it's given, so an unsorted order would make
 // which failure gets reported (and the order of per-file log lines) vary
 // between identical runs of the same input.
+// 中文导读：setup 已经筛选规则，这里把“规则类别 -> 文件”的索引转成
+// “文件 -> 所有规则”，使同一文件只解析、写出一次。cgo 的原始文件名还需要
+// 映射到 Go 工具链实际交给编译器的生成文件，不能直接改写原来的 .go 文件。
 func groupRules(workDir string, rset *rule.InstRuleSet) (map[string][]rule.InstRule, []string) {
 	file2rules := make(map[string][]rule.InstRule)
 	addRulesToMap(rset.FuncRules, file2rules, rset.CgoFileMap, workDir)
@@ -86,6 +89,9 @@ type ruleResult struct {
 func (ip *instrumentPhase) applyOneRule(ctx context.Context, r rule.InstRule, root *dst.File,
 	funcDecl *dst.FuncDecl, found bool,
 ) (ruleResult, error) {
+	// 中文导读：各类规则共享编译拦截入口，但生成形式不同。func 规则生成
+	// Before/After 调用和 HookContext；call/lit 等直接改写表达式，不必经过
+	// 函数入口的 trampoline。新增组件时应按实际改写需求选择规则种类。
 	switch rt := r.(type) {
 	case *rule.InstFuncRule:
 		// applyFuncRule reports whether it actually instrumented a function; a
@@ -154,6 +160,9 @@ func rsetHasMethodCallRule(rset *rule.InstRuleSet) bool {
 // instrumentFile applies rules to a single file and reports whether any of
 // them is a function rule (i.e. whether a globals file is needed).
 func (ip *instrumentPhase) instrumentFile(ctx context.Context, file string, rules []rule.InstRule) (bool, error) {
+	// 中文导读：dst 比普通 go/ast 多保留了注释和排版装饰；ignore 指令也在
+	// 这些注释中，所以不能仅解析不含注释的语法树。fileIgnored 是文件级开关，
+	// 函数级 instrument 可重新启用，但同一函数自己的 ignore 仍会优先跳过。
 	// Group rules by file, then parse the target file once
 	root, err := ip.parseFile(file)
 	if err != nil {
@@ -215,6 +224,9 @@ func (ip *instrumentPhase) instrumentFile(ctx context.Context, file string, rule
 }
 
 func (ip *instrumentPhase) instrument(ctx context.Context, rset *rule.InstRuleSet) error {
+	// 中文导读：本方法仍在“构建时”运行。FileRules 先把额外 Go 文件加入
+	// 当前包，然后逐文件应用 AST 规则，最后按需增加包级 globals 文件。
+	// 原函数体的执行、Span 创建与结束都要等生成的应用启动后才发生。
 	hasFuncRule := false
 	// Apply file rules first because they can introduce new files that used
 	// by other rules such as raw rules

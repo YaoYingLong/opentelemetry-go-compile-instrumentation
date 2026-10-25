@@ -45,6 +45,10 @@ func (ip *instrumentPhase) addRuleImports(
 	ruleImports map[string]string,
 	ruleName string,
 ) error {
+	// 中文导读：注入片段写的是 import 别名，编译依赖登记用的是包路径。
+	// 两者要一起处理：检查已有别名 -> 增加源码 import -> 更新 importcfg。
+	// 仅把同一路径当作“已经导入”并不够，例如片段使用 http.X，而源文件
+	// 只声明了 h "net/http"，生成的 http.X 仍无法解析。
 	if len(ruleImports) == 0 {
 		return nil
 	}
@@ -113,6 +117,9 @@ func (ip *instrumentPhase) resolveImportOverrides(
 	root *dst.File,
 	ruleImports map[string]string,
 ) (map[string]string, map[string]string) {
+	// 中文导读：需要重用文件既有别名的模板改写，会先计算规则别名到文件
+	// 别名的映射。包名不总等于导入路径最后一段，故优先使用 setup 生成的
+	// importNames；多别名时排序选择，使重复构建产生相同源码。
 	importAliases := ast.ImportAliasMap(root, ip.importNames)
 
 	// Collect every alias the file uses for each path, sorted, so alias
@@ -172,6 +179,8 @@ func resolveAliasOverrides(ruleImports map[string]string, existingAliasSets map[
 // target name that happens to match a rule's alias is never mistaken for a
 // qualifier the rule wrote.
 func replaceQualifierAliases(node dst.Node, overrides map[string]string) {
+	// 中文导读：只替换规则写出的限定名前缀，不应误改目标函数中同名变量。
+	// 动态插入的参数/接收者名字仍带标记，先替换别名、再去标记，次序不能反过来。
 	if len(overrides) == 0 {
 		return
 	}
@@ -216,6 +225,9 @@ func stripDynamicIdents(node dst.Node) {
 //
 // checkAliasOverrideShadowing reports no error when enclosing is nil.
 func checkAliasOverrideShadowing(overrides map[string]string, enclosing *dst.FuncDecl) error {
+	// 中文导读：即使改成了文件中的正确别名，函数局部变量也可能遮蔽它。
+	// 例如文件导入 h "net/http"，目标函数又有参数 h，此时注入 h.X 会指向
+	// 参数而非包，必须报错。这里按注入点所在的函数顶层作用域检查。
 	if len(overrides) == 0 || enclosing == nil {
 		return nil
 	}

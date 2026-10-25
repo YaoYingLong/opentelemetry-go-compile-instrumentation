@@ -1,5 +1,8 @@
 version: "v1.0.0"
 
+# 中文导读：三条规则共同实现 GLS（goroutine 本地存储）。先为 g 增加字段，
+# 再把访问函数编入 runtime，最后在创建 goroutine 的 newproc1 中继承上下文。
+# 这些是构建阶段的源码改写，最终二进制中的访问函数才在应用运行时执行。
 add_gls_field:
   target: "runtime"
   where:
@@ -21,6 +24,10 @@ gls_linker:
         file: "runtime_gls.go"
         path: "go.opentelemetry.io/otelc/instrumentation/runtime"
 
+# raw 内容本身是将插入目标函数的 Go 代码，不是 YAML 注释。
+# _unnamedRetVal0 是改写器为 newproc1 的未命名返回值生成的名字，指向新 g；
+# defer 在函数返回时赋值，callergp 是创建者。这里只继承 trace/baggage，
+# 不复制 otel_ignored_call_count，因此子 goroutine 不继承父的 hook 抑制计数。
 goroutine_propagate:
   target: "runtime"
   where:

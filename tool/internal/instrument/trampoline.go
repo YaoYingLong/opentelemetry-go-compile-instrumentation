@@ -30,6 +30,12 @@ import (
 // so-called "Trampoline Jump" snippet is inserted at start of raw func, it is
 // guaranteed to be generated within one line to avoid confusing debugging, as
 // its name suggests, it jumps to the trampoline function from raw function.
+//
+// 中文导读：本文件中的 Go 函数大多是“构建时的代码生成器”；它们生成的
+// Before/After trampoline 才在应用运行时执行。与 Java Advice 类比，
+// hook 是组件作者编写的业务观测逻辑，trampoline 是框架生成的适配层：
+// 负责参数地址、HookContext、hook 调用和局部 panic 隔离。
+// 这里不负责决定 HTTP、SQL 等语义，也不直接负责创建或导出 Span。
 
 const (
 	trampolineBeforeName            = "OtelBeforeTrampoline"
@@ -110,6 +116,11 @@ var parsedTemplateImpl = sync.OnceValues(func() (*dst.File, error) {
 })
 
 func (ip *instrumentPhase) materializeTemplate() error {
+	// 中文导读：impl.tmpl 是待生成的源码模板，不是直接被链接的实现。
+	// 每条规则克隆独立 AST 后再改名和填参数；不能修改共享 proto，避免下一条
+	// 规则继承上一条的状态。模板中的 recover 只覆盖 trampoline 自身及其
+	// 同一调用栈上的 hook；不包住原函数体，也不捕获 hook 另起 goroutine 的
+	// panic。诊断代码自身若再次 panic，也没有额外一层 recover 兜底。
 	// Read trampoline template and materialize before and after function
 	// declarations based on that
 	proto, err := parsedTemplateImpl()
@@ -437,6 +448,10 @@ func matchBaseType(trampBase, hookBase string) bool {
 // checkHookDecl checks if the hook function declaration is correct, i.e. if they
 // have correct signature (parameter count and types)
 func (ip *instrumentPhase) checkHookDecl(hookFunc *dst.FuncDecl, before bool) error {
+	// 中文导读：这是生成前的签名形状检查，不是完整的 Go 类型检查。
+	// baseTypeName 会规整包限定名和指针等表示；最终生成代码是否满足全部
+	// 类型关系仍由 Go 编译器校验。Before 接收 HookContext + 接收者/参数，
+	// After 接收 HookContext + 结果值，不会自动再收到整组入参。
 	// TargetFunc:  func A(a int, b string) (ret string)
 	// BeforeTramp: func B(a *int, b *string) (ctx *HookContext, skip bool)
 	// BeforeHook:  func C(ctx *HookContext, a int, b string)
@@ -493,6 +508,10 @@ func (ip *instrumentPhase) checkHookDecl(hookFunc *dst.FuncDecl, before bool) er
 }
 
 func (ip *instrumentPhase) callBeforeHook(t *rule.InstFuncRule) {
+	// 中文导读：trampoline 收到 *T，但真实 hook 通常收到 T，所以这里生成
+	// 解引用调用。若要替换原局部参数，应使用 HookContext.SetParam；仅在
+	// hook 内重新赋值其形参通常只改变 hook 的副本。变参在目标函数内部是
+	// 切片，调用非泛型变参 hook 时还需重新展开；含类型参数的整体值另行处理。
 	// Query whether the parameter is a variadic parameter in the target function
 	targetParams := findTargetParamType(ip.targetFunc)
 	genericTypes := findTargetGenericType(ip.target, ip.targetFunc)
@@ -543,6 +562,10 @@ func (ip *instrumentPhase) callAfterHook(t *rule.InstFuncRule) {
 // hookGuardCond builds the condition that gates a trampoline's call to its
 // real hook function
 func (ip *instrumentPhase) hookGuardCond(fnName string) dst.Expr {
+	// 中文导读：存在调用点 ignore 时，还要查询 runtime 中的抑制状态。
+	// 这允许对某一次调用路径临时屏蔽 hook；与 applyFuncRule 在构建时
+	// 完全不生成某个函数的插桩是两个层次。fnName 的调用目标由下面的
+	// linkname 函数声明连接，不能把这里的 nil 检查理解成动态注册机制。
 	notNil := &dst.BinaryExpr{X: ast.Ident(fnName), Op: token.NEQ, Y: ast.Nil()}
 	if !ip.buildUsesIgnoreDirective {
 		return notNil
@@ -570,6 +593,10 @@ func suppressHooksCall(funcName string, selfPackage bool) *dst.CallExpr {
 }
 
 func (ip *instrumentPhase) addHookDecl(t *rule.InstFuncRule, paramTypes *dst.FieldList, before bool) error {
+	// 中文导读：目标包只放一个无函数体的声明，用 linkname 把本地名字连接到
+	// hook 包的真实函数符号；无需在被插桩包源码中直接 import 整个 hook 包。
+	// setup 在应用一侧生成依赖导入，保证 hook 包进入构建。这也是必须保留
+	// unsafe 导入、并允许编译不含函数体声明的原因。此处并不执行 hook。
 	fnName := getHookFuncName(t, before)
 	funcDecl := &dst.FuncDecl{
 		Name: ast.Ident(fnName),
@@ -693,6 +720,9 @@ func findTargetResultType(targetFunc *dst.FuncDecl) *dst.FieldList {
 // ->
 // [K, V]
 func findTargetGenericType(file *dst.File, targetFunc *dst.FuncDecl) *dst.FieldList {
+	// 中文导读：独立函数的类型形参和泛型接收者的类型形参都必须出现在
+	// 生成的独立 trampoline 上，才能让 T 等名字有定义。上方英文示意用于
+	// 展示两种来源；Go 方法本身不能再声明一套独立的类型形参。
 	var trampolineTypeParams *dst.FieldList
 	if ast.HasReceiver(targetFunc) {
 		receiverTypeParams := extractReceiverTypeParams(file, targetFunc.Recv.List[0].Type)
@@ -719,6 +749,10 @@ func findTargetGenericType(file *dst.File, targetFunc *dst.FuncDecl) *dst.FieldL
 }
 
 func (ip *instrumentPhase) buildTrampSignature(before bool) {
+	// 中文导读：Before 的形参来自接收者与入参，After 的形参来自结果。
+	// 对每个 T 生成 *T；变参 ...T 先降为 []T，再取指针，得到 *[]T。
+	// 下面的 ast.DereferenceOf 在“类型位置”生成的是指针类型，不是一次
+	// 运行时解引用；相同的 * 语法在表达式位置才表示读取指针指向的值。
 	var fields *dst.FieldList
 	if before {
 		beforeTramp := ip.beforeTrampFunc
@@ -746,6 +780,9 @@ func (ip *instrumentPhase) buildTrampSignature(before bool) {
 }
 
 func (ip *instrumentPhase) buildHookSignature(t *rule.InstFuncRule, before bool) (*dst.FieldList, error) {
+	// 中文导读：trampoline 可以保留具体类型甚至目标包的私有类型，hook 却
+	// 可能来自外部包。允许 hook 使用 any 承接这些值；含类型形参的复合类型
+	// 则整体拓宽为 interface{}，而不是把 []T 错误变成 []interface{}。
 	// TargetFunc: func A(a int, b string) (ret string)
 	// BeforeHook: func B(ctx *HookContext, a int, b string)
 	// AfterHook:  func C(ctx *HookContext, ret string)
@@ -818,6 +855,9 @@ func assignSliceLiteral(assignStmt *dst.AssignStmt, vals []dst.Expr) bool {
 
 // populateHookContext populates the hook context before hook invocation
 func (ip *instrumentPhase) populateHookContext(before bool) bool {
+	// 中文导读：这里填的是 trampoline 形参中的地址；Before 保存入参地址，
+	// After 运行时才补入结果地址，二者共享同一个 HookContext 实例。
+	// 因此 Before 尚不能按 After 已完成的状态去读取真实返回结果。
 	funcDecl := ip.beforeTrampFunc
 	if !before {
 		funcDecl = ip.afterTrampFunc
@@ -897,6 +937,11 @@ func (ip *instrumentPhase) implementHookContext(t *rule.InstFuncRule) {
 }
 
 func setValue(field string, idx int, t dst.Expr) *dst.CaseClause {
+	// 中文导读：以下生成具体索引的 setter 分支，例如 int 槽生成
+	// *c.params[0].(*int) = val.(int)，写回的是目标局部变量。val 的类型
+	// 必须匹配；nil 特殊生成 *new(T) 取得 T 的零值，既适用 int，也适用
+	// 指针、命名接口等。注意 ast.IsInterfaceType 的分支是直接替换槽位，
+	// 它并未生成相同的指针写回代码，阅读时需要区分这两条路径。
 	// interface{}/any is a passthrough slot with no pointer indirection.
 	se := ast.SelectorExpr(ast.Ident(trampolineCtxIdentifier), field)
 	if ast.IsInterfaceType(t) {
@@ -925,6 +970,9 @@ func setValue(field string, idx int, t dst.Expr) *dst.CaseClause {
 }
 
 func getValue(field string, idx int, t dst.Expr) *dst.CaseClause {
+	// 中文导读：这是按签名生成的类型断言与解引用，不依赖 reflect。
+	// 和 setter 对称，ast.IsInterfaceType 分支直接返回槽值；其他分支
+	// 从槽中取 *T 再读取 T。参数索引与 collectArguments 一致，结果单独从 0 编号。
 	// return *(c.Params[idx].(*int))
 	// return c.Params[idx] iff type is interface{}
 	se := ast.SelectorExpr(ast.Ident(trampolineCtxIdentifier), field)
@@ -971,6 +1019,9 @@ func setReturnValClause(idx int, t dst.Expr) *dst.CaseClause {
 // Go; U is still constrained by comparable). If no matching declaration is found in
 // file, the constraint falls back to any, as before.
 func extractReceiverTypeParams(file *dst.File, recvType dst.Expr) *dst.FieldList {
+	// 中文导读：接收者可以把类型参数重命名，例如声明 M[K, V]、方法使用
+	// M[A, B]，约束中的 K 也要按位置改成 A。这里只在当前源文件中寻找
+	// 原类型声明；若声明在同包另一文件，当前实现回退 any，不是包级类型解析。
 	switch t := recvType.(type) {
 	case *dst.StarExpr:
 		// *GenStruct[T] - recurse into X
@@ -1166,6 +1217,9 @@ func desugarType(param *dst.Field) dst.Expr {
 }
 
 func rewriteParamMethods(targetFunc *dst.FuncDecl, methodSetParam, methodGetParam *dst.BlockStmt) {
+	// 中文导读：a, b int 在语法树里可能是同一个 Field、两个 Names，
+	// 但 hook 索引必须占两个位置。因此既遍历 Field，也逐个遍历名字；
+	// 方法接收者先占位置 0，显式形参的索引整体后移一位。
 	idx := 0
 	if ast.HasReceiver(targetFunc) {
 		recvType := targetFunc.Recv.List[0].Type
@@ -1202,6 +1256,10 @@ func rewriteReturnValMethods(targetFunc *dst.FuncDecl, methodSetRetVal, methodGe
 }
 
 func (ip *instrumentPhase) rewriteHookContextMethods() {
+	// 中文导读：每条规则生成自己专用的 Get/Set switch，使槽位与目标类型
+	// 对应。当前对泛型目标明确生成 panic：四个按索引读写参数/结果的方法
+	// 都不支持，不应因 hook 可以用 any 接收泛型实参就认为这些 API 也可用。
+	// 组件 hook 应通过自己的入参读取泛型值，并遵守当前实现的能力边界。
 	util.Assert(len(ip.hookCtxMethods) > 4, "sanity check")
 	var methodSetParam, methodGetParam, methodGetRetVal, methodSetRetVal *dst.FuncDecl
 	for _, decl := range ip.hookCtxMethods {
@@ -1384,6 +1442,11 @@ func (ip *instrumentPhase) callHookFunc(t *rule.InstFuncRule, before bool) error
 }
 
 func (ip *instrumentPhase) createTrampoline(t *rule.InstFuncRule) error {
+	// 中文导读：生成顺序具有依赖关系：模板 -> 独立类型名 -> 按目标签名
+	// 生成 HookContext API -> trampoline 名字/签名 -> hook 声明及调用。
+	// 模板里的 OtelGetStackImpl/OtelPrintStackImpl 则是用于栈诊断的函数变量，
+	// 与真实 Before/After 函数声明用途不同。排查其符号位置时，应同时阅读
+	// writeGlobals 和 setup/genVarDecl 中按 hook 包路径生成的 linkname 别名。
 	// Ensure unsafe package is imported since we use //go:linkname directives
 	ip.ensureUnsafeImport()
 	// Materialize various declarations from template file, no one wants to see

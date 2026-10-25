@@ -1,11 +1,18 @@
+# 中文导读：顶层 version 是读取本文件所需的最低 otelc 版本。
+# 它不是 Go 或 net/http 的支持版本。
 version: "v1.0.0"
 
+# target 选中被编译的包；where 用函数名和 receiver 精确选中方法声明。
+# 本规则只覆盖标准 *http.Transport.RoundTrip；自定义 RoundTripper 若不调用它，
+# 不会仅因为实现了同名接口方法就自动匹配。
 client_hook:
   target: net/http
   where:
     func: RoundTrip
     recv: "*Transport"
   do:
+    # 在原方法入口/出口注入调用，原方法主体仍会执行。
+    # path 是 hook 实现包；before 接收原方法参数，after 接收原方法返回值。
     - inject_hooks:
         before: BeforeRoundTrip
         after: AfterRoundTrip

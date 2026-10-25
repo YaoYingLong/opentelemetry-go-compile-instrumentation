@@ -1,6 +1,9 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
+// 本包是应用运行时的公共支持层，不是 Go 标准库 runtime。
+// 阅读顺序：SetupOTelSDK -> Initialize -> setupOpenTelemetry -> 各 Provider。
+// 编译工具负责把调用入口放进应用；本文件的函数在生成的应用启动/运行时执行。
 package runtime
 
 import (
@@ -40,6 +43,8 @@ var (
 )
 
 func init() {
+	// Go 在调用包的使用方之前完成依赖包初始化。这里先准备日志器；
+	// SDK 初始化入口则位于注入 main 包的 init_otelsdk.go，两者职责不同。
 	// Initialize logger early so hook packages can use it with the correct log level
 	// This is called at package load time, before any hooks execute
 	logger = slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
@@ -55,6 +60,8 @@ type Config struct {
 
 // Initialize sets up OpenTelemetry with defensive error handling
 func Initialize(cfg Config) {
+	// defer 注册当前函数返回/展开 panic 时要运行的闭包。
+	// recover 必须在延迟调用中捕获当前 goroutine 的 panic；它不是全局异常处理器。
 	// Defensive: ensure instrumentation initialization never crashes user application
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -102,6 +109,8 @@ func logLevel() slog.Level {
 // service.instance.id. WithFromEnv stays last so OTEL_SERVICE_NAME and
 // OTEL_RESOURCE_ATTRIBUTES still win.
 func newResource(ctx context.Context) *resource.Resource {
+	// Resource 描述产生遥测的服务/进程，Provider 持有它；每次请求的 URL、
+	// 状态码等属于 Span 属性，不应混入这里。多个 WithXxx 是函数选项模式。
 	res, err := resource.New(ctx,
 		resource.WithTelemetrySDK(),
 		resource.WithService(),
@@ -133,6 +142,8 @@ func setupOpenTelemetry(cfg Config) {
 	}))
 
 	ctx := context.Background()
+	// 这里的 ctx 用于初始化，不是请求上下文。三个信号各自安装 Provider，
+	// 一个返回 error 时记录日志并继续尝试其他信号，不让普通配置失败中断应用。
 	res := newResource(ctx)
 
 	// Setup trace provider with auto-configured exporter
@@ -183,6 +194,8 @@ func setupTraceProvider(ctx context.Context, res *resource.Resource) error {
 	}
 
 	spanProcessor := newSpanProcessor(traceExporter)
+	// 职责链：Tracer 创建 Span -> SpanProcessor 处理结束的 Span -> Exporter 导出。
+	// Provider 则统一管理 Tracer、Resource 和处理器；这与 Java OTel SDK 的分层相近。
 
 	tracerProvider = sdktrace.NewTracerProvider(
 		sdktrace.WithResource(res),
@@ -197,6 +210,8 @@ func setupTraceProvider(ctx context.Context, res *resource.Resource) error {
 }
 
 func newSpanProcessor(traceExporter sdktrace.SpanExporter) sdktrace.SpanProcessor {
+	// Simple 在 Span 结束时同步导出，便于短程序/测试观察；Batch 通过缓冲批量导出。
+	// “编译时插桩”仍有 Span 创建和导出的运行时成本，不能理解为遥测零开销。
 	if useSimpleSpanProcessor() {
 		logger.Debug("using SimpleSpanProcessor for immediate span export")
 		return sdktrace.NewSimpleSpanProcessor(traceExporter)
@@ -276,6 +291,8 @@ func setupLoggerProvider(ctx context.Context, res *resource.Resource) error {
 
 // Shutdown gracefully shuts down the OpenTelemetry SDK
 func Shutdown(ctx context.Context) error {
+	// 不在第一个错误处退出：尽量关闭三个 Provider，再聚合错误交给调用者。
+	// ctx 约束这次关闭的时限；程序直接退出并不意味着所有缓冲数据都已发送。
 	var errs []error
 
 	if tracerProvider != nil {
@@ -338,6 +355,8 @@ func shutdownSignals() []os.Signal {
 // the application owns its own exit path and exit code. Terminating here would
 // race an application running its own graceful shutdown and could truncate it.
 func setupSignalHandler() {
+	// sync.Once 保证这个信号监听器只注册一次，不代表整个 SDK 初始化只执行一次。
+	// 带 1 个缓冲槽的 channel 接收 OS 信号，独立 goroutine 等待，不阻塞主程序。
 	registerSignalHandler.Do(func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, shutdownSignals()...)
@@ -349,6 +368,7 @@ func setupSignalHandler() {
 // It does not exit or re-raise the signal, leaving the process exit to the
 // application or the OS default disposition.
 func handleShutdownSignal(sigCh chan os.Signal) {
+	// <- 是 channel 接收操作；没有信号时此 goroutine 阻塞等待。
 	sig := <-sigCh
 
 	// Stop listening now so a repeated signal isn't swallowed by our buffered
@@ -359,6 +379,7 @@ func handleShutdownSignal(sigCh chan os.Signal) {
 	logger.Info("received signal, flushing telemetry", "signal", sig.String())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// 即使 Shutdown 提前完成也要 cancel，及时释放计时器等资源。
 	defer cancel()
 
 	if err := Shutdown(ctx); err != nil {

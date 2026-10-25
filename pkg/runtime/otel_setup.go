@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 )
 
+// configCache 保存一次环境变量解析结果。发布后只读；环境变量改变时创建
+// 新对象替换旧对象，避免多个 goroutine 同时修改同一个 map。
 type configCache struct {
 	sdkDisabled   string
 	enabledRaw    string
@@ -19,6 +21,8 @@ type configCache struct {
 	disabledMap   map[string]struct{}
 }
 
+// atomic.Pointer[T] 是泛型原子指针：Load/Store 使整个缓存对象的发布和读取安全。
+// 它不会自动让指针所指对象中的 map 变成并发可写，所以必须遵守上面的只读约定。
 var instConfigCache atomic.Pointer[configCache]
 
 // SetupOTelSDK initializes the OpenTelemetry SDK.
@@ -94,11 +98,15 @@ func SetupOTelSDK() {
 // vars haven't changed. See BenchmarkInstrumented for the unset vs.
 // configured-list allocation counts this caching actually buys.
 func Instrumented(instrumentationName string) bool {
+	// 运行期开关供组件决定是否创建/记录遥测；框架仍可能调用 hook，After 也可能
+	// 需要收尾。它不能让二进制获得构建时未选中的组件，与 setup 选规则是不同层次。
 	sdkDisabled := os.Getenv("OTEL_SDK_DISABLED")
 	enabledList := os.Getenv("OTEL_GO_ENABLED_INSTRUMENTATIONS")
 	disabledList := os.Getenv("OTEL_GO_DISABLED_INSTRUMENTATIONS")
 
 	cached := instConfigCache.Load()
+	// 每次仍读环境变量，缓存的是字符串拆分后的集合；并发读到相同变化时，
+	// 多个 goroutine 各自构建相同快照也可接受，因为不会修改已发布对象。
 	if cached == nil || cached.sdkDisabled != sdkDisabled || cached.enabledRaw != enabledList ||
 		cached.disabledRaw != disabledList {
 		cached = buildConfigCache(sdkDisabled, enabledList, disabledList)
@@ -112,6 +120,8 @@ func Instrumented(instrumentationName string) bool {
 	name := strings.ToLower(instrumentationName)
 
 	if cached.hasEnabled {
+		// map 查询的第二个结果 ok 表示键是否存在；这里把 map 当作集合。
+		// 启用列表非空时先做白名单，再检查禁用列表，因此禁用优先。
 		if _, ok := cached.enabledMap[name]; !ok {
 			return false
 		}
@@ -133,6 +143,8 @@ func buildConfigCache(sdkDisabled, enabledList, disabledList string) *configCach
 	}
 
 	if parsed := parseInstrumentationList(enabledList); len(parsed) > 0 {
+		// map[string]struct{} 表示字符串集合；空结构体作为值不携带额外业务数据。
+		// 只有空格/逗号的列表解析后为空，不会形成“禁止全部组件”的白名单。
 		c.hasEnabled = true
 		c.enabledMap = make(map[string]struct{})
 		for _, item := range parsed {
@@ -153,6 +165,8 @@ func buildConfigCache(sdkDisabled, enabledList, disabledList string) *configCach
 // parseInstrumentationList parses a comma-separated list of instrumentation names.
 func parseInstrumentationList(list string) []string {
 	var result []string
+	// SplitSeq 返回可供 range 遍历的迭代器；每轮只处理一个片段。
+	// nil 切片可直接 append，省去了显式初始化空切片。
 	for item := range strings.SplitSeq(list, ",") {
 		trimmed := strings.TrimSpace(strings.ToLower(item))
 		if trimmed != "" {
